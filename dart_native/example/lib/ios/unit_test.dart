@@ -154,3 +154,4 @@ testIOS(RuntimeStub stub, DelegateStub delegate) {
   NSNotificationCenter.defaultCenter.addObserver(
       delegate, delegate.handleNotification, 'SampleDartNotification', nil);
 }
+

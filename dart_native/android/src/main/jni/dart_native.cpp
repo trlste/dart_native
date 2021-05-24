@@ -1,6 +1,5 @@
 #include <jni.h>
 #include <stdint.h>
-#include <android/log.h>
 #include <string.h>
 #include <malloc.h>
 #include <map>
@@ -8,15 +7,19 @@
 #include <regex>
 #include <dart_api_dl.h>
 #include <semaphore.h>
+#include "dn_log.h"
+#include "dn_method_call.h"
+#include "dn_type_convert.h"
+#include <any>
 
 extern "C" {
 
-#define NSLog(...)  __android_log_print(ANDROID_LOG_DEBUG,"Native",__VA_ARGS__)
 
 static JavaVM *gJvm = nullptr;
 static jobject gClassLoader;
 static jmethodID gFindClassMethod;
 static pthread_key_t detachKey = 0;
+
 
 typedef void (*NativeMethodCallback)(
     void *targetPtr,
@@ -38,7 +41,7 @@ static std::map<jlong, int64_t> dartPortCache;
 
 
 void detachThreadDestructor(void* arg) {
-  NSLog("detach from current thread");
+  DNDebugLog("detach from current thread");
   gJvm->DetachCurrentThread();
   detachKey = 0;
 }
@@ -58,17 +61,17 @@ JNIEnv *getEnv() {
     case JNI_OK:
       return env;
     case JNI_EDETACHED:
-      NSLog("attach to current thread");
+      DNDebugLog("attach to current thread");
       gJvm->AttachCurrentThread(&env, NULL);
       return env;
     default:
-      NSLog("fail to get env");
+      DNErrorLog("fail to get env");
       return nullptr;
   }
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *pjvm, void *reserved) {
-    NSLog("JNI_OnLoad");
+    DNDebugLog("JNI_OnLoad");
     gJvm = pjvm;  // cache the JavaVM pointer
     //replace with one of your classes in the line below
     auto randomClass = getEnv()->FindClass("com/dartnative/dart_native/DartNativePlugin");
@@ -80,7 +83,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *pjvm, void *reserved) {
     gFindClassMethod = getEnv()->GetMethodID(classLoaderClass, "findClass",
                                         "(Ljava/lang/String;)Ljava/lang/Class;");
 
-    NSLog("JNI_OnLoad finish");
+    DNDebugLog("JNI_OnLoad finish");
     return JNI_VERSION_1_6;
 }
 
@@ -150,7 +153,7 @@ jclass findClass(JNIEnv *env, const char *name) {
     jthrowable exception = env->ExceptionOccurred();
     if (exception) {
       env->ExceptionClear();
-      NSLog("findClass exception");
+      DNDebugLog("findClass exception");
       return static_cast<jclass>(env->CallObjectMethod(gClassLoader,
                                                        gFindClassMethod,
                                                        env->NewStringUTF(name)));
@@ -197,7 +200,7 @@ void retain(void *classPtr) {
 void release(void *classPtr) {
     jobject object = static_cast<jobject>(classPtr);
     if (referenceCount[object] == NULL) {
-        NSLog("not contain object");
+        DNDebugLog("not contain object");
         return;
     }
     int count = referenceCount[object];
@@ -237,11 +240,11 @@ void *invokeNativeMethodNeo(void *classPtr, char *methodName, void **args, char 
         }
     }
     else if (strcmp(returnType, "C") == 0) {
-        auto nativeChar = getEnv()->CallCharMethodA(object, method, argValues);
+        auto nativeChar = CALL_NATIVE_METHOD(getEnv(), Char, object, method, argValues);
         nativeInvokeResult = (void *) nativeChar;
     }
     else if(strcmp(returnType, "I") == 0) {
-        auto nativeInt = getEnv()->CallIntMethodA(object, method, argValues);
+        auto nativeInt = CALL_NATIVE_METHOD(getEnv(), Int, object, method, argValues);
         nativeInvokeResult = (void *) nativeInt;
     }
     else if(strcmp(returnType, "D") == 0) {
@@ -295,7 +298,7 @@ void registerCallbackManager(jlong targetAddr, char *functionName, void *callbac
 
 NativeMethodCallback getCallbackMethod(jlong targetAddr, char *functionName) {
     if (!callbackManagerCache.count(targetAddr)) {
-        NSLog("getCallbackMethod error not register %s", functionName);
+        DNDebugLog("getCallbackMethod error not register %s", functionName);
         return NULL;
     }
     std::map<std::string, NativeMethodCallback> methodsMap = callbackManagerCache[targetAddr];
@@ -327,7 +330,7 @@ intptr_t InitDartApiDL(void *data) {
 static void RunFinalizer(void *isolate_callback_data,
                          Dart_WeakPersistentHandle handle,
                          void *peer) {
-    NSLog("finalizer");
+    DNDebugLog("finalizer");
     release(peer);
 }
 
@@ -335,7 +338,7 @@ void PassObjectToCUseDynamicLinking(Dart_Handle h, void *classPtr) {
     if (Dart_IsError_DL(h)) {
         return;
     }
-    NSLog("retain");
+    DNDebugLog("retain");
     retain(classPtr);
     intptr_t size = 8;
     Dart_NewWeakPersistentHandle_DL(h, classPtr, size, RunFinalizer);
@@ -352,7 +355,7 @@ bool NotifyDart(Dart_Port send_port, const Work* work) {
 
     const bool result = Dart_PostCObject_DL(send_port, &dart_object);
     if (!result) {
-        NSLog("Native callback to Dart failed! Invalid port or isolate died");
+        DNErrorLog("Native callback to Dart failed! Invalid port or isolate died");
     }
     return result;
 }
@@ -372,7 +375,7 @@ JNIEXPORT jobject JNICALL Java_com_dartnative_dart_1native_CallbackInvocationHan
                                                                                                jobjectArray args,
                                                                                                jstring return_type) {
     if (!dartPortCache.count(dartObject)) {
-      NSLog("not register dart port!");
+      DNErrorLog("not register dart port!");
       return NULL;
     }
 
@@ -450,11 +453,11 @@ JNIEXPORT jobject JNICALL Java_com_dartnative_dart_1native_CallbackInvocationHan
 
     jobject callbackResult = NULL;
     if (isSemInitSuccess) {
-        NSLog("wait work execute");
+        DNDebugLog("wait work execute");
         sem_wait(&sem);
         //todo optimization
         if (returnType == nullptr) {
-          NSLog("void");
+          DNDebugLog("void");
         } else if (strcmp(returnType, "Ljava/lang/String;") == 0) {
             callbackResult = env->NewStringUTF(arguments[0] == nullptr ? (char *) ""
                                                                               : (char *) arguments[0]);

@@ -26,20 +26,20 @@ class _IOSAppState extends State<IOSApp> {
     // Benchmark
     String testString =
         'This is a long string: sdlfdksjflksndhiofuu2893873(*（%￥#@）*&……￥撒肥料开发时傅雷家书那份会计师东方丽景三等奖';
-    int time = DateTime.now().millisecondsSinceEpoch;
+    // int time = DateTime.now().millisecondsSinceEpoch;
 
-    for (var i = 0; i < 10000; i++) {
-      String _ = await platform.invokeMethod('fooNSString:', testString);
-    }
+    // for (var i = 0; i < 10000; i++) {
+    //   String _ = await platform.invokeMethod('fooNSString:', testString);
+    // }
 
-    print(
-        "Flutter Channel Cost: ${DateTime.now().millisecondsSinceEpoch - time}");
-    time = DateTime.now().millisecondsSinceEpoch;
-    for (var i = 0; i < 10000; i++) {
-      String _ = stub.fooNSString(testString);
-    }
+    // print(
+    //     "Flutter Channel Cost: ${DateTime.now().millisecondsSinceEpoch - time}");
+    // time = DateTime.now().millisecondsSinceEpoch;
+    // for (var i = 0; i < 10000; i++) {
+    //   String _ = stub.fooNSString(testString);
+    // }
 
-    print("DartNative Cost: ${DateTime.now().millisecondsSinceEpoch - time}");
+    // print("DartNative Cost: ${DateTime.now().millisecondsSinceEpoch - time}");
     testIOS(stub, delegate);
   }
 

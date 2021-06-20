@@ -6,18 +6,22 @@ import 'package:dart_native/src/ios/runtime/internal/block_lifecycle.dart';
 import 'package:dart_native/src/ios/runtime/internal/native_runtime.dart';
 import 'package:dart_native/src/ios/runtime/nsobject.dart';
 
-void passObjectToNative(NSObject obj) {
+bool bindLifecycleOnNative(NSObject obj) {
   // Ignore null and nil
-  if (obj == null || obj == nil) {
-    return;
+  if (obj == null || obj == nil || obj.pointer == nullptr) {
+    return false;
   }
 
-  if (initDartAPISuccess && obj.isa != null) {
-    passObjectToC(obj, obj.pointer);
-    addFinalizerForObject(obj);
-  } else {
+  if (!initDartAPISuccess) {
     print('pass object to native failed! address=${obj.pointer}');
+    return false;
   }
+
+  if (passObjectToC(obj, obj.pointer) != 0 && obj.isa != null) {
+    addFinalizerForObject(obj);
+    return true;
+  }
+  return false;
 }
 
 void _dealloc(Pointer<Void> ptr) {

@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <functional>
 #import <objc/runtime.h>
+#include <mach/mach.h>
 #import <Foundation/Foundation.h>
+
 #import "DNBlockWrapper.h"
 #import "DNFFIHelper.h"
 #import "DNMethodIMP.h"
@@ -22,8 +24,140 @@
 #error
 #endif
 
-NSMethodSignature *
-native_method_signature(Class cls, SEL selector) {
+#if TARGET_OS_OSX && __x86_64__
+    // 64-bit Mac - tag bit is LSB
+#   define OBJC_MSB_TAGGED_POINTERS 0
+#else
+    // Everything else - tag bit is MSB
+#   define OBJC_MSB_TAGGED_POINTERS 1
+#endif
+
+#if OBJC_MSB_TAGGED_POINTERS
+#   define _OBJC_TAG_MASK (1UL<<63)
+#else
+#   define _OBJC_TAG_MASK 1UL
+#endif
+
+# if __arm64__
+#   define ISA_MASK        0x0000000ffffffff8ULL
+#   define ISA_MAGIC_MASK  0x000003f000000001ULL
+#   define ISA_MAGIC_VALUE 0x000001a000000001ULL
+
+# elif __x86_64__
+#   define ISA_MASK        0x00007ffffffffff8ULL
+#   define ISA_MAGIC_MASK  0x001f800000000001ULL
+#   define ISA_MAGIC_VALUE 0x001d800000000001ULL
+
+# else
+    // Available bits in isa field are architecture-specific.
+#   error unknown architecture
+# endif
+
+#pragma mark - Readable and valid memory
+
+/// Returens true if a pointer is a tagged pointer
+/// @param ptr is the pointer to check
+bool objc_isTaggedPointer(const void *ptr) {
+    return ((uintptr_t)ptr & _OBJC_TAG_MASK) == _OBJC_TAG_MASK;
+}
+
+/// Returns true if the pointer points to readable and valid memory.
+/// @param pointer is the pointer to check
+bool native_isValidReadableMemory(const void *pointer) {
+    // Check for read permissions
+    vm_address_t address = (vm_address_t)pointer;
+    vm_size_t vmsize = 0;
+    mach_port_t object = 0;
+#if defined(__LP64__) && __LP64__
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+    kern_return_t ret = vm_region_64(mach_task_self(), &address, &vmsize, VM_REGION_BASIC_INFO, (vm_region_info_t)&info, &infoCnt, &object);
+#else
+    vm_region_basic_info_data_t info;
+    mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT;
+    kern_return_t ret = vm_region(mach_task_self(), &address, &vmsize, VM_REGION_BASIC_INFO, (vm_region_info_t)&info, &infoCnt, &object);
+#endif
+    // vm_region/vm_region_64 returned an error or no read permission
+    if (ret != KERN_SUCCESS || (info.protection&VM_PROT_READ) == 0) {
+        return false;
+    }
+    
+    // Read the memory
+    vm_offset_t data = 0;
+    mach_msg_type_number_t dataCnt = 0;
+    ret = vm_read(mach_task_self(), (vm_address_t)pointer, sizeof(uintptr_t), &data, &dataCnt);
+    if (ret != KERN_SUCCESS) {
+        // vm_read returned an error
+        return false;
+    }
+    return true;
+}
+
+/// Returns true if a pointer is an Objective-C object
+/// @param pointer is the pointer to check
+bool native_isObjcObject(const void *pointer) {
+    if (pointer == nullptr) {
+        return false;
+    }
+    // Check for tagged pointers
+    if (objc_isTaggedPointer(pointer)) {
+        return true;
+    }
+    // Check if the pointer is aligned
+    if (((uintptr_t)pointer % sizeof(uintptr_t)) != 0) {
+        return false;
+    }
+    // Check if the pointer is not larger than VM_MAX_ADDRESS
+    if ((uintptr_t)pointer > MACH_VM_MAX_ADDRESS) {
+        return false;
+    }
+    // Check if the memory is valid and readable
+    if (!native_isValidReadableMemory(pointer)) {
+        return false;
+    }
+    
+    uintptr_t isa = (*(uintptr_t *)pointer);
+    Class ptrClass = NULL;
+    
+    if ((isa & ~ISA_MASK) == 0) {
+        ptrClass = (__bridge Class)(void *)isa;
+    } else {
+        if ((isa & ISA_MAGIC_MASK) == ISA_MAGIC_VALUE) {
+            ptrClass = (__bridge Class)(void *)(isa & ISA_MASK);
+        } else {
+            ptrClass = (__bridge Class)(void *)isa;
+        }
+    }
+    
+    if (ptrClass == NULL) {
+        return false;
+    }
+    
+    //
+    // Verifies that the found Class is a known class.
+    //
+    bool isKnownClass = false;
+    
+    unsigned int numClasses = 0;
+    Class *classesList = objc_copyClassList(&numClasses);
+    for (int i = 0; i < numClasses; i++) {
+        if (classesList[i] == ptrClass) {
+            isKnownClass = true;
+            break;
+        }
+    }
+    free(classesList);
+    
+    if (!isKnownClass) {
+        return false;
+    }
+    
+    return true;
+}
+
+#pragma mark - Objective-C runtime functions
+
+NSMethodSignature *native_method_signature(Class cls, SEL selector) {
     if (!selector) {
         return nil;
     }
@@ -31,8 +165,7 @@ native_method_signature(Class cls, SEL selector) {
     return signature;
 }
 
-void
-native_signature_encoding_list(NSMethodSignature *signature, const char **typeEncodings, BOOL decodeRetVal) {
+void native_signature_encoding_list(NSMethodSignature *signature, const char **typeEncodings, BOOL decodeRetVal) {
     if (!signature || !typeEncodings) {
         return;
     }
@@ -46,8 +179,7 @@ native_signature_encoding_list(NSMethodSignature *signature, const char **typeEn
     }
 }
 
-BOOL
-native_add_method(id target, SEL selector, char *types, void *callback, Dart_Port dartPort) {
+BOOL native_add_method(id target, SEL selector, char *types, void *callback, Dart_Port dartPort) {
     Class cls = object_getClass(target);
     NSString *selName = [NSString stringWithFormat:@"dart_native_%@", NSStringFromSelector(selector)];
     SEL key = NSSelectorFromString(selName);
@@ -73,8 +205,7 @@ native_add_method(id target, SEL selector, char *types, void *callback, Dart_Por
     return NO;
 }
 
-char *
-native_protocol_method_types(Protocol *proto, SEL selector) {
+char *native_protocol_method_types(Protocol *proto, SEL selector) {
     struct objc_method_description description = protocol_getMethodDescription(proto, selector, YES, YES);
     if (description.types == NULL) {
         description = protocol_getMethodDescription(proto, selector, NO, YES);
@@ -82,8 +213,7 @@ native_protocol_method_types(Protocol *proto, SEL selector) {
     return description.types;
 }
 
-Class
-native_get_class(const char *className, Class superclass) {
+Class native_get_class(const char *className, Class superclass) {
     Class result = objc_getClass(className);
     if (result) {
         return result;
@@ -96,8 +226,7 @@ native_get_class(const char *className, Class superclass) {
     return result;
 }
 
-void *
-_mallocReturnStruct(NSMethodSignature *signature) {
+void *_mallocReturnStruct(NSMethodSignature *signature) {
     const char *type = signature.methodReturnType;
     NSUInteger size;
     DNSizeAndAlignment(type, &size, NULL, NULL);
@@ -106,8 +235,7 @@ _mallocReturnStruct(NSMethodSignature *signature) {
     return result;
 }
 
-void
-_fillArgsToInvocation(NSMethodSignature *signature, void **args, NSInvocation *invocation, NSUInteger offset, int64_t stringTypeBitmask, NSMutableArray<NSString *> *stringTypeBucket) {
+void _fillArgsToInvocation(NSMethodSignature *signature, void **args, NSInvocation *invocation, NSUInteger offset, int64_t stringTypeBitmask, NSMutableArray<NSString *> *stringTypeBucket) {
     for (NSUInteger i = offset; i < signature.numberOfArguments; i++) {
         const char *argType = [signature getArgumentTypeAtIndex:i];
         NSUInteger argsIndex = i - offset;
@@ -165,8 +293,7 @@ void *_dataForNSStringReturnValue(NSString *retVal, const char **retType) {
     return dataPtr;
 }
 
-void *
-native_instance_invoke(id object, SEL selector, NSMethodSignature *signature, dispatch_queue_t queue, void **args, void (^callback)(void *), Dart_Port dartPort, int64_t stringTypeBitmask, const char **retType) {
+void *native_instance_invoke(id object, SEL selector, NSMethodSignature *signature, dispatch_queue_t queue, void **args, void (^callback)(void *), Dart_Port dartPort, int64_t stringTypeBitmask, const char **retType) {
     if (!object || !selector || !signature) {
         return NULL;
     }
@@ -219,8 +346,7 @@ native_instance_invoke(id object, SEL selector, NSMethodSignature *signature, di
     }
 }
 
-void *
-native_block_create(char *types, void *callback, Dart_Port dartPort) {
+void *native_block_create(char *types, void *callback, Dart_Port dartPort) {
     NSError *error;
     DNBlockWrapper *wrapper = [[DNBlockWrapper alloc] initWithTypeString:types
                                                                 callback:(NativeBlockCallback)callback
@@ -232,8 +358,7 @@ native_block_create(char *types, void *callback, Dart_Port dartPort) {
     return (__bridge void *)wrapper;
 }
 
-void *
-native_block_invoke(void *block, void **args, Dart_Port dartPort, int64_t stringTypeBitmask, const char **retType) {
+void *native_block_invoke(void *block, void **args, Dart_Port dartPort, int64_t stringTypeBitmask, const char **retType) {
     if (!block) {
         return nullptr;
     }
@@ -325,8 +450,7 @@ native_all_type_encodings() {
 #define PTR(type) COND(type, typeList[16])
 
 // When returns struct encoding, it needs to be freed.
-const char *
-native_type_encoding(const char *str) {
+const char *native_type_encoding(const char *str) {
     if (!str || strlen(str) == 0) {
         return NULL;
     }
@@ -374,8 +498,7 @@ native_type_encoding(const char *str) {
 }
 
 // Returns type encodings whose need to be freed.
-const char **
-native_types_encoding(const char *str, int *count, int startIndex) {
+const char **native_types_encoding(const char *str, int *count, int startIndex) {
     int argCount = DNTypeCount(str) - startIndex;
     const char **argTypes = (const char **)malloc(sizeof(char *) * argCount);
     if (argTypes == NULL) {
@@ -410,8 +533,7 @@ native_types_encoding(const char *str, int *count, int startIndex) {
 }
 
 // Returns struct encoding which will be freed.
-const char *
-native_struct_encoding(const char *encoding) {
+const char *native_struct_encoding(const char *encoding) {
     NSUInteger size, align;
     long length;
     DNSizeAndAlignment(encoding, &size, &align, &length);
@@ -445,8 +567,7 @@ native_struct_encoding(const char *encoding) {
     return typePtr;
 }
 
-bool
-LP64() {
+bool LP64() {
 #if defined(__LP64__) && __LP64__
     return true;
 #else
@@ -454,8 +575,7 @@ LP64() {
 #endif
 }
 
-bool
-NS_BUILD_32_LIKE_64() {
+bool NS_BUILD_32_LIKE_64() {
 #if defined(NS_BUILD_32_LIKE_64) && NS_BUILD_32_LIKE_64
     return true;
 #else
@@ -463,21 +583,18 @@ NS_BUILD_32_LIKE_64() {
 #endif
 }
 
-dispatch_queue_main_t
-_dispatch_get_main_queue(void) {
+dispatch_queue_main_t _dispatch_get_main_queue(void) {
     return dispatch_get_main_queue();
 }
 
-void
-native_mark_autoreleasereturn_object(id object) {
+void native_mark_autoreleasereturn_object(id object) {
     int64_t address = (int64_t)object;
     [NSThread.currentThread dn_performWaitingUntilDone:YES block:^{
         NSThread.currentThread.threadDictionary[@(address)] = object;
     }];
 }
 
-const uint16_t *
-native_convert_nsstring_to_utf16(NSString *string, NSUInteger *length) {
+const uint16_t *native_convert_nsstring_to_utf16(NSString *string, NSUInteger *length) {
     NSData *data = [string dataUsingEncoding:NSUTF16StringEncoding];
     // UTF16, 2-byte per unit
     *length = data.length / 2;
@@ -604,14 +721,23 @@ static void RunFinalizer(void *isolate_callback_data,
     #pragma clang diagnostic pop
 }
 
-void PassObjectToCUseDynamicLinking(Dart_Handle h, id object) {
+bool PassObjectToCUseDynamicLinking(Dart_Handle h, void *pointer) {
+    bool isObject = native_isObjcObject(pointer);
+    if (!isObject) {
+        return false;
+    }
+    id object = (__bridge id)pointer;
+    if (object_isClass(object)) {
+        return false;
+    }
     // Only Block handles lifetime of BlockWrapper. So we can't transfer it to Dart.
     if (Dart_IsError_DL(h) || [object isKindOfClass:DNBlockWrapper.class]) {
-        return;
+        return false;
     }
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     [object performSelector:NSSelectorFromString(@"retain")];
     #pragma clang diagnostic pop
-    Dart_NewWeakPersistentHandle_DL(h, (__bridge void *)(object), 8, RunFinalizer);
+    Dart_NewWeakPersistentHandle_DL(h, pointer, 8, RunFinalizer);
+    return true;
 }

@@ -6,11 +6,12 @@
 //
 
 #import "native_runtime.h"
+#import <objc/runtime.h>
+#import <mach/mach.h>
+#import <os/lock.h>
+#import <Foundation/Foundation.h>
 #include <stdlib.h>
 #include <functional>
-#import <objc/runtime.h>
-#include <mach/mach.h>
-#import <Foundation/Foundation.h>
 
 #import "DNBlockWrapper.h"
 #import "DNFFIHelper.h"
@@ -93,9 +94,9 @@ bool native_isValidReadableMemory(const void *pointer) {
     return true;
 }
 
-/// Returns true if a pointer is an Objective-C object
+/// Returns true if a pointer is valid
 /// @param pointer is the pointer to check
-bool native_isObjcObject(const void *pointer) {
+bool native_isValidPointer(const void *pointer) {
     if (pointer == nullptr) {
         return false;
     }
@@ -115,43 +116,6 @@ bool native_isObjcObject(const void *pointer) {
     if (!native_isValidReadableMemory(pointer)) {
         return false;
     }
-    
-    uintptr_t isa = (*(uintptr_t *)pointer);
-    Class ptrClass = NULL;
-    
-    if ((isa & ~ISA_MASK) == 0) {
-        ptrClass = (__bridge Class)(void *)isa;
-    } else {
-        if ((isa & ISA_MAGIC_MASK) == ISA_MAGIC_VALUE) {
-            ptrClass = (__bridge Class)(void *)(isa & ISA_MASK);
-        } else {
-            ptrClass = (__bridge Class)(void *)isa;
-        }
-    }
-    
-    if (ptrClass == NULL) {
-        return false;
-    }
-    
-    //
-    // Verifies that the found Class is a known class.
-    //
-    bool isKnownClass = false;
-    
-    unsigned int numClasses = 0;
-    Class *classesList = objc_copyClassList(&numClasses);
-    for (int i = 0; i < numClasses; i++) {
-        if (classesList[i] == ptrClass) {
-            isKnownClass = true;
-            break;
-        }
-    }
-    free(classesList);
-    
-    if (!isKnownClass) {
-        return false;
-    }
-    
     return true;
 }
 
@@ -179,14 +143,21 @@ void native_signature_encoding_list(NSMethodSignature *signature, const char **t
     }
 }
 
-BOOL native_add_method(id target, SEL selector, char *types, void *callback, Dart_Port dartPort) {
+BOOL native_add_method(id target, SEL selector, char *types, void *callback, id callbackBlock, Dart_Port dartPort) {
     Class cls = object_getClass(target);
     NSString *selName = [NSString stringWithFormat:@"dart_native_%@", NSStringFromSelector(selector)];
     SEL key = NSSelectorFromString(selName);
+    // TODO: 区分 port
+    objc_setAssociatedObject(target, key, callbackBlock, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     DNMethodIMP *imp = objc_getAssociatedObject(cls, key);
     // Existing implemention can't be replaced. Flutter hot-reload must also be well handled.
-    if (!imp && [target respondsToSelector:selector]) {
-        return NO;
+    if ([target respondsToSelector:selector]) {
+        if (imp) {
+            [imp addDartPort:dartPort];
+            return YES;
+        } else {
+            return NO;
+        }
     }
     if (types != NULL) {
         NSError *error;
@@ -688,9 +659,18 @@ void NotifyMethodPerformToDart(DNInvocation *invocation,
         }
     };
     const Work* work_ptr = new Work(work);
+    
     BOOL success = NotifyDart(methodIMP.dartPort, work_ptr);
     if (sema && success) {
         dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    }
+    // TODO: use dispatch group
+    NSSet<NSNumber *> *dartPorts = methodIMP.dartPorts;
+    for (NSNumber *port in dartPorts) {
+        BOOL success = NotifyDart(port.integerValue, work_ptr);
+        if (sema && success) {
+            dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+        }
     }
 }
 
@@ -711,21 +691,58 @@ void NotifyDeallocToDart(intptr_t address, Dart_Port dartPort) {
 
 #pragma mark - Dart Finalizer
 
-static void RunFinalizer(void *isolate_callback_data,
+static NSMutableDictionary<NSNumber *, NSNumber *> *objectRefCount = [NSMutableDictionary dictionary];
+
+API_AVAILABLE(ios(10.0))
+static os_unfair_lock _refCountUnfairLock = OS_UNFAIR_LOCK_INIT;
+static NSLock *_refCountLock = [[NSLock alloc] init];
+
+static void _RunFinalizer(void *isolate_callback_data,
                          Dart_WeakPersistentHandle handle,
                          void *peer) {
+    NSNumber *address = @((intptr_t)peer);
+    NSUInteger refCount = objectRefCount[address].unsignedIntegerValue;
+    if (refCount > 1) {
+        objectRefCount[address] = @(refCount - 1);
+        return;
+    }
     SEL selector = NSSelectorFromString(@"release");
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     [(__bridge id)peer performSelector:selector];
     #pragma clang diagnostic pop
+    objectRefCount[address] = nil;
 }
 
-bool PassObjectToCUseDynamicLinking(Dart_Handle h, void *pointer) {
-    bool isObject = native_isObjcObject(pointer);
-    if (!isObject) {
+static void RunFinalizer(void *isolate_callback_data,
+                         Dart_WeakPersistentHandle handle,
+                         void *peer) {
+    if (@available(iOS 10.0, *)) {
+        os_unfair_lock_lock(&_refCountUnfairLock);
+        _RunFinalizer(isolate_callback_data, handle, peer);
+        os_unfair_lock_unlock(&_refCountUnfairLock);
+    } else {
+        [_refCountLock lock];
+        _RunFinalizer(isolate_callback_data, handle, peer);
+        [_refCountLock unlock];
+    }
+}
+
+bool _PassObjectToCUseDynamicLinking(Dart_Handle h, void *pointer) {
+    NSNumber *address = @((intptr_t)pointer);
+    NSUInteger refCount = objectRefCount[address].unsignedIntegerValue;
+    // pointer is already retained by dart object, just increase its reference count.
+    if (refCount > 0) {
+        Dart_NewWeakPersistentHandle_DL(h, pointer, 8, RunFinalizer);
+        objectRefCount[address] = @(refCount + 1);
+        return true;
+    }
+    // First invoking on pointer. Slow path.
+    bool isValid = native_isValidPointer(pointer);
+    if (!isValid) {
         return false;
     }
+    
     id object = (__bridge id)pointer;
     if (object_isClass(object)) {
         return false;
@@ -739,5 +756,20 @@ bool PassObjectToCUseDynamicLinking(Dart_Handle h, void *pointer) {
     [object performSelector:NSSelectorFromString(@"retain")];
     #pragma clang diagnostic pop
     Dart_NewWeakPersistentHandle_DL(h, pointer, 8, RunFinalizer);
+    objectRefCount[address] = @1;
     return true;
+}
+
+bool PassObjectToCUseDynamicLinking(Dart_Handle h, void *pointer) {
+    bool result;
+    if (@available(iOS 10.0, *)) {
+        os_unfair_lock_lock(&_refCountUnfairLock);
+        result = _PassObjectToCUseDynamicLinking(h, pointer);
+        os_unfair_lock_unlock(&_refCountUnfairLock);
+    } else {
+        [_refCountLock lock];
+        result = _PassObjectToCUseDynamicLinking(h, pointer);
+        [_refCountLock unlock];
+    }
+    return result;
 }

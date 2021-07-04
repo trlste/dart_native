@@ -26,15 +26,15 @@ DN_EXTERN bool objc_isTaggedPointer(const void *ptr);
 /// @param pointer is the pointer to check
 DN_EXTERN bool native_isValidReadableMemory(const void *pointer);
 
-/// Returns true if a pointer is an Objective-C object
+/// Returns true if a pointer is valid
 /// @param pointer is the pointer to check
-DN_EXTERN bool native_isObjcObject(const void *pointer);
+DN_EXTERN bool native_isValidPointer(const void *pointer);
 
 DN_EXTERN NSMethodSignature * _Nullable native_method_signature(Class cls, SEL selector);
 
 DN_EXTERN void native_signature_encoding_list(NSMethodSignature *signature, const char * _Nonnull * _Nonnull typeEncodings, BOOL decodeRetVal);
 
-DN_EXTERN BOOL native_add_method(id target, SEL selector, char *types, void *callback, Dart_Port dartPort);
+DN_EXTERN BOOL native_add_method(id target, SEL selector, char *types, void *callback, id callbackBlock, Dart_Port dartPort);
 
 DN_EXTERN char * _Nullable native_protocol_method_types(Protocol *proto, SEL selector);
 

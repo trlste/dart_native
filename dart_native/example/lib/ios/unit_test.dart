@@ -155,7 +155,7 @@ testIOS(RuntimeStub stub, DelegateStub delegate) {
   //     delegate, delegate.handleNotification, 'SampleDartNotification', nil);
 
   // Isolate.spawn(_checkTimer, 'isolate0');
-  Isolate.spawn(_checkTimer1, stub.pointer.address);
+  // Isolate.spawn(_checkTimer1, stub.pointer.address);
 }
 
 // void _checkTimer(String isolateID) async {

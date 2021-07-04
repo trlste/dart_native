@@ -21,11 +21,11 @@ class _IOSAppState extends State<IOSApp> {
 
   // Platform messages are asynchronous, so we initialize in an async method.
   Future<void> initPlatformState() async {
-    RuntimeSon stub = RuntimeSon();
+    // RuntimeSon stub = RuntimeSon();
     DelegateStub delegate = DelegateStub();
     // Benchmark
-    String testString =
-        'This is a long string: sdlfdksjflksndhiofuu2893873(*（%￥#@）*&……￥撒肥料开发时傅雷家书那份会计师东方丽景三等奖';
+    // String testString =
+    //     'This is a long string: sdlfdksjflksndhiofuu2893873(*（%￥#@）*&……￥撒肥料开发时傅雷家书那份会计师东方丽景三等奖';
     // int time = DateTime.now().millisecondsSinceEpoch;
 
     // for (var i = 0; i < 10000; i++) {
@@ -40,7 +40,7 @@ class _IOSAppState extends State<IOSApp> {
     // }
 
     // print("DartNative Cost: ${DateTime.now().millisecondsSinceEpoch - time}");
-    testIOS(stub, delegate);
+    // testIOS(stub, delegate);
   }
 
   @override

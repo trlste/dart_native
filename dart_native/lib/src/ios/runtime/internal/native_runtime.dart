@@ -22,12 +22,14 @@ typedef AddMethodC = Int32 Function(
     Pointer<Void> selector,
     Pointer<Utf8> types,
     Pointer<NativeFunction<MethodIMPCallbackC>> callback,
+    Pointer<Void> callbackBlock,
     Int64 dartPort);
 typedef AddMethodD = int Function(
     Pointer<Void> target,
     Pointer<Void> selector,
     Pointer<Utf8> types,
     Pointer<NativeFunction<MethodIMPCallbackC>> callback,
+    Pointer<Void> callbackBlock,
     int dartPort);
 final AddMethodD nativeAddMethod =
     runtimeLib.lookupFunction<AddMethodC, AddMethodD>('native_add_method');

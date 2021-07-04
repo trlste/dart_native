@@ -20,6 +20,8 @@ typedef void (*NativeMethodCallback)(void *_Nullable *_Null_unspecified args,
 
 @property (nonatomic, readonly) NativeMethodCallback callback;
 @property (nonatomic, getter=hasStret, readonly) BOOL stret;
+// Set of dart port when method is registerd on multi-isolates.
+@property (nonatomic, readonly) NSSet<NSNumber *> *dartPorts;
 @property (nonatomic, readonly) Dart_Port dartPort;
 
 - (instancetype)initWithTypeEncoding:(const char *)typeEncodings
@@ -27,6 +29,8 @@ typedef void (*NativeMethodCallback)(void *_Nullable *_Null_unspecified args,
                             dartPort:(Dart_Port)dartPort
                                error:(NSError **)error;
 - (IMP)imp;
+- (NSSet<NSNumber *> *)dartPorts;
+- (void)addDartPort:(Dart_Port)port;
 
 @end
 

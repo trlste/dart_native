@@ -4,6 +4,7 @@ import 'package:dart_native/src/ios/common/callback_manager.dart';
 import 'package:dart_native/src/ios/common/pointer_encoding.dart';
 import 'package:dart_native/src/ios/common/pointer_wrapper.dart';
 import 'package:dart_native/src/ios/foundation/internal/objc_type_box.dart';
+import 'package:dart_native/src/ios/runtime/block.dart';
 import 'package:dart_native/src/ios/runtime/id.dart';
 import 'package:dart_native/src/ios/runtime/internal/native_runtime.dart';
 import 'package:dart_native/src/ios/runtime/nsobject.dart';
@@ -14,10 +15,11 @@ bool registerMethodCallback(
     id target, SEL selector, Function function, Pointer<Utf8> types) {
   Pointer<Void> targetPtr = target.pointer;
   Pointer<Void> selectorPtr = selector.toPointer();
+  Pointer<Void> blockPtr = Block(function).pointer;
   CallbackManager.shared
-      .setCallbackForSelectorOnTarget(targetPtr, selectorPtr, function);
-  int result =
-      nativeAddMethod(targetPtr, selectorPtr, types, _callbackPtr, nativePort);
+      .setCallbackForSelectorOnTarget(targetPtr, selectorPtr, null);
+  int result = nativeAddMethod(
+      targetPtr, selectorPtr, types, _callbackPtr, blockPtr, nativePort);
   return result != 0;
 }
 
